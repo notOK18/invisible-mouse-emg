@@ -1,0 +1,11 @@
+{
+  "script_start_wall": "2026-11-08T15:46:55.521",
+  "per_finger": 60,
+  "rest_s": 5.0,
+  "gap": [
+    1.1,
+    1.6
+  ],
+  "seed": 344833025,
+  "beats_logged": 120
+}
