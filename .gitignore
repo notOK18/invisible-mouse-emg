@@ -2,5 +2,3 @@
 __pycache__/
 *.pyc
 .DS_Store
-# trained models are rebuilt by train_fingers.py (they depend on the scikit-learn version)
-models/

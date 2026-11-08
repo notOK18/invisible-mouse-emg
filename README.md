@@ -40,6 +40,10 @@ to background, plus some frequency content, so a second EMG channel should help.
 
 ## Use
 
+The trained model is included: `models/emg_fingers_2stage.joblib` (trained on every recording in `data/`,
+saved with scikit-learn 1.9.1). If your scikit-learn version differs and it fails to load, rebuild it with
+`python train_fingers.py`.
+
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
@@ -113,6 +117,7 @@ In rough priority order. Tick them off here as they are done.
 | `mixed_data.py` | Loads recordings, lines the cue times up with the EMG, snaps them to real bursts |
 | `record_cues.py` | Cue window that shows which finger to press and logs the beats |
 | `train_fingers.py` | Training, the leave-one-session-out test, and saving the model |
+| `models/emg_fingers_2stage.joblib` | The trained model: press detector + finger classifier |
 | `data/` | The recordings the model was trained on |
 
 Data files are OpenSignals text exports (`.txt`) plus the cue log (`.csv`, `.cue.json`).
