@@ -64,6 +64,47 @@ The detector stays silent for the first 3 s while it learns the background level
 3. Also record `sN_motion.txt` (arm moving, no presses) and `sN_rest.txt` (hand still).
 4. Re-attach the electrodes between sessions. Use a new `N` every time.
 
+## Next steps
+
+In rough priority order. Tick them off here as they are done.
+
+**Improve the click model**
+- [ ] **Second EMG channel.** Get a second sensor cable (and a reference lead) so one electrode pair sits
+  over each finger's muscle. Wrong-button errors (about 1 in 5 now) should drop the most. The code reads
+  only column `A2` today: `emg_pipeline.py` needs a list of channels, per-channel features, and the
+  ratio between channels as extra features. Record new sessions with both channels.
+- [ ] **More sessions** (at least 3 more, electrodes re-attached each time). Session 3 is the weakest (70%).
+- [ ] **Realistic presses.** Record a session with presses 2.5-4 s apart, like real clicking, and
+  re-check missed presses and false clicks.
+- [ ] **Quick calibration at the start of each use:** about 10 index and 10 middle presses to adapt the
+  finger classifier to that day's electrode contact.
+- [ ] **Nested validation.** The detector settings in `train_fingers.py` were tuned on the same held-out
+  sessions; tune them inside the training folds so the reported numbers are not optimistic.
+
+**False clicks from arm movement**
+- [ ] Record motion and rest files for every session, including gentle cursor steering and
+  **pressing while moving** (the cue program works for this).
+- [ ] Use the IMU to suppress clicks for a moment when the hand accelerates. Most remaining false
+  clicks come right when a movement suddenly starts.
+
+**Cursor control (IMU, no training needed)**
+- [ ] Record a short IMU sample: still, then flicks in each of the four directions, plus finger taps.
+- [ ] Build the flick detector: remove gravity, high-pass, threshold with hysteresis, fixed speed,
+  a lockout after each flick so the deceleration does not undo the move, and a freeze around clicks.
+- [ ] Tune the thresholds and lockout time on the recorded sample.
+
+**Put it together**
+- [ ] Live input: stream the BITalino into `FingerDetector.push()` (OpenSignals real-time output or
+  the BITalino Python API). Measure the delay from press to click (expected about 0.25 s).
+- [ ] Send the cursor moves and clicks to the OS (for example with `pynput` or `pyautogui`).
+- [ ] End-to-end test with a small task (move to a target, left click, right click) and count errors.
+- [ ] **Fallback if accuracy stays low:** single tap = left click, double tap = right click, or a
+  light tap versus a whole-hand squeeze. The press detector already works on one channel.
+
+**Housekeeping**
+- [ ] Never reuse a file name when recording; `record_cues.py` now refuses to overwrite.
+- [ ] Add a licence once the team decides on one.
+
 ## Files
 
 | File | Purpose |
