@@ -122,3 +122,60 @@ In rough priority order. Tick them off here as they are done.
 
 Data files are OpenSignals text exports (`.txt`) plus the cue log (`.csv`, `.cue.json`).
 The session is the part of the name before the first underscore.
+
+---
+
+## Threshold click detector (live pipeline)
+
+The random-forest pipeline above is superseded for live use by a much simpler **threshold detector**. On a first single-session test the forest found every press but picked the wrong button about half the time (10 of 21 correct on held-out blocks, even at 92% window accuracy). Looking at the data showed why: the peak strength of an index press and a fist press barely overlap, and a few thresholds on that peak use it directly. In the first labelled session:
+
+| Gesture | Peak strength (rms / background) |
+|---------|----------------------------------|
+| Index   | 2.2 to 6.1                       |
+| Fist    | 6.8 to 12.2                      |
+
+The peak over the first 250 ms of a press was already enough to tell them apart.
+
+### How it works
+
+1. **Strength.** Raw A2 is band-passed 20-450 Hz with a 50 Hz notch (causal), then the RMS of a 200 ms window (25 ms hop) is divided by a running background level (20th percentile of the last 5 s). This is the same normalisation as the old pipeline, so electrode contact and a tense arm matter less.
+2. **Onset.** When strength crosses `x`, a press has started and the peak is tracked for 200 ms.
+3. **Button.** If the peak reaches `y`, it is a **fist** (right click, fires immediately). Otherwise it is an **index** press (left click, fires when the 200 ms ends).
+4. **One click per press.** After a click, strength must fall below 0.8 x `x` for 100 ms and 0.3 s must pass before the next click, so holding a fist is one click.
+
+The thresholds are fitted automatically: `x` is the geometric mean of the 99.5th percentile of rest strength and the 10th percentile of index peaks; `y` is the geometric mean of the median index peak and the median fist peak. They are saved as readable JSON in `models/emg_thresholds.json`.
+
+### Files
+
+| File             | Purpose                                                                                  |
+|------------------|------------------------------------------------------------------------------------------|
+| `emg_common.py`  | BITalino connection, streaming filter and features, `ThresholdClicker`                   |
+| `record_emg.py`  | Records 60 s from A2; you label it live by holding **A** (index) or **D** (fist)         |
+| `train_emg.py`   | Fits `x` and `y`, runs a held-out click test, saves `models/emg_thresholds.json`         |
+| `live_emg.py`    | Streams the BITalino and sends left/right clicks with `pynput`                           |
+
+### Use
+
+```
+py record_emg.py     # 60 s, stay relaxed for the first 5 s, then alternate holds with ~2 s rest
+py train_emg.py      # uses every data/emg_*.npz and prints the held-out click test
+py live_emg.py       # run in a second terminal next to imu_mouse.py
+```
+
+- **Recording tips:** aim for about 40% rest, keep holds under about 2 s, vary the strength a little, and use a new file each session. A plot at the end lets you check that your labels line up with the bursts.
+- **Live keys** (global): **E** toggles clicking, **X** quits. `imu_mouse.py` uses Q, M and C, so these do not clash.
+- **Tuning:** `py live_emg.py --monitor` shows live strength and state. Override the saved thresholds without retraining with `--x 2.5 --y 7`.
+- **Latency:** about 0.3 s from the start of a press for a left click; right clicks are faster because they fire as soon as strength passes `y`.
+
+### Setup notes (Windows)
+
+- Connect the BITalino through its **outgoing** COM port (`COM9` in `emg_common.py`; check Settings > Bluetooth > More Bluetooth settings > COM Ports). The incoming port hangs, and PyBluez's MAC-address connection crashes on Python 3.10+.
+- Extra packages: `numpy`, `scipy`, `keyboard`, `pynput`, `matplotlib`, `pyserial`, plus `bitalino.py`.
+- Run the EMG and IMU scripts as two separate processes so neither can stall the other.
+
+### Limits
+
+- One subject and a thin margin between the classes (the highest index peak and lowest fist peak were close). Re-attaching the electrodes shifts the numbers, so record a fresh session and re-run `train_emg.py` when the placement changes.
+- Held-out click test on the first session: _fill in from the `train_emg.py` output_.
+- Single presses only: holding a fist does not drag.
+- Arm movement can still cause false clicks. The IMU-based suppression listed in the next steps is not built yet.
