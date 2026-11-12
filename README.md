@@ -4,6 +4,8 @@ Part of the invisible mouse project: a wrist IMU moves the cursor, and forearm E
 clicks. This repo holds the **EMG click model**: index finger flexion = left click, middle
 finger flexion = right click, from **one** BITalino EMG channel (port A2, 1000 Hz).
 
+The live demo uses the threshold detector (index = left click, fist = right click); see "Threshold click detector" and "Why thresholds instead of a model" below.
+
 ## How it works
 
 Two stages, run together in `emg_pipeline.FingerDetector`:
@@ -98,9 +100,9 @@ In rough priority order. Tick them off here as they are done.
 - [ ] Tune the thresholds and lockout time on the recorded sample.
 
 **Put it together**
-- [ ] Live input: stream the BITalino into `FingerDetector.push()` (OpenSignals real-time output or
-  the BITalino Python API). Measure the delay from press to click (expected about 0.25 s).
-- [ ] Send the cursor moves and clicks to the OS (for example with `pynput` or `pyautogui`).
+- [x] Live input: stream the BITalino into the click detector. Done in `live_emg.py` with the threshold
+  detector (not `FingerDetector`); the press-to-click delay has not been measured yet.
+- [x] Send the cursor moves and clicks to the OS (`pynput`).
 - [ ] End-to-end test with a small task (move to a target, left click, right click) and count errors.
 - [ ] **Fallback if accuracy stays low:** single tap = left click, double tap = right click, or a
   light tap versus a whole-hand squeeze. The press detector already works on one channel.
@@ -127,14 +129,7 @@ The session is the part of the name before the first underscore.
 
 ## Threshold click detector (live pipeline)
 
-The random-forest pipeline above is superseded for live use by a much simpler **threshold detector**. On a first single-session test the forest found every press but picked the wrong button about half the time (10 of 21 correct on held-out blocks, even at 92% window accuracy). Looking at the data showed why: the peak strength of an index press and a fist press barely overlap, and a few thresholds on that peak use it directly. In the first labelled session:
-
-| Gesture | Peak strength (rms / background) |
-|---------|----------------------------------|
-| Index   | 2.2 to 6.1                       |
-| Fist    | 6.8 to 12.2                      |
-
-The peak over the first 250 ms of a press was already enough to tell them apart.
+The random-forest pipeline above is superseded for live use by a much simpler **threshold detector**. On a first single-session test the forest found every press but picked the wrong button about half the time (10 of 21 correct on held-out blocks, even at 92% window accuracy). Looking at the data showed why: the peak strength of an index press and a fist press do not overlap, and two thresholds on that peak use it directly (see the peak table under "Why thresholds instead of a model").
 
 ### How it works
 
@@ -163,7 +158,7 @@ py live_emg.py       # run in a second terminal next to imu_mouse.py
 ```
 
 - **Recording tips:** aim for about 40% rest, keep holds under about 2 s, vary the strength a little, and use a new file each session. A plot at the end lets you check that your labels line up with the bursts.
-- **Live keys** (global): **E** toggles clicking, **X** quits. `imu_mouse.py` uses Q, M and C, so these do not clash.
+- **Live keys** (global): **E** toggles clicks, **X** quits. `imu_mouse.py` uses Q, M and C, so these do not clash.
 - **Tuning:** `py live_emg.py --monitor` shows live strength and state. Override the saved thresholds without retraining with `--x 2.5 --y 7`.
 - **Latency:** about 0.3 s from the start of a press for a left click; right clicks are faster because they fire as soon as strength passes `y`.
 
@@ -176,6 +171,101 @@ py live_emg.py       # run in a second terminal next to imu_mouse.py
 ### Limits
 
 - One subject and a thin margin between the classes (the highest index peak and lowest fist peak were close). Re-attaching the electrodes shifts the numbers, so record a fresh session and re-run `train_emg.py` when the placement changes.
-- Held-out click test on the first session: _fill in from the `train_emg.py` output_.
+- Held-out click test (single 60 s recording, 5 time blocks): 34 of 47 presses correct, 2 wrong button, 11 missed, 2 false clicks.
 - Single presses only: holding a fist does not drag.
 - Arm movement can still cause false clicks. The IMU-based suppression listed in the next steps is not built yet.
+
+---
+
+## System overview and quick start
+
+The invisible mouse is two independent processes on one laptop:
+
+| Part   | Hardware                                                              | Script         | What it does                                      |
+|--------|-----------------------------------------------------------------------|----------------|---------------------------------------------------|
+| Cursor | WitMotion WT901BLE IMU on the wrist (BLE)                             | `imu_mouse.py` | Tilting the hand moves the cursor                 |
+| Clicks | BITalino, electrodes over the forearm, channel A2 (Bluetooth serial)  | `live_emg.py`  | Index press = left click, fist = right click      |
+
+Run them in two terminals, EMG first:
+
+```
+py live_emg.py       # keep the arm relaxed for the first 3 s
+py imu_mouse.py      # hold the sensor in a neutral pose while it calibrates, then press M
+```
+
+| Script         | Keys (global, work from any window)                                  |
+|----------------|----------------------------------------------------------------------|
+| `imu_mouse.py` | **M** toggle cursor (starts off), **C** recalibrate neutral, **Q** quit |
+| `live_emg.py`  | **E** toggle clicks, **X** quit                                      |
+
+Note that the live demo uses **index vs full fist**, while the original random-forest pipeline above separates **index vs middle finger**. The reason is explained below.
+
+---
+
+## IMU cursor control (`imu_mouse.py`)
+
+This replaces the flick-detector plan under "Cursor control" in the next steps. What is built is a **tilt joystick**:
+
+1. **Sensor.** The WT901BLE streams combined `0x55 0x61` packets (acceleration, angular velocity, angle) as BLE notifications. Only the **accelerometer** is used; the gyro and onboard angles are ignored.
+2. **Gravity direction.** The acceleration vector is normalised and low-pass filtered, so what remains is the direction of gravity in the sensor frame.
+3. **Calibration.** At start (and on **C**) the average gravity direction over 3 s of holding still becomes the neutral pose.
+4. **Tilt to velocity.** The angle between current gravity and neutral gives a horizontal and a vertical tilt. A small dead zone ignores jitter, and tilt is mapped linearly to cursor speed up to a maximum (dead zone, full-speed angle, sensitivity and filter constants are in the `CONFIGURATION` block at the top of the script). Velocity is smoothed, and fractional pixel movement is accumulated so slow tilts still move the cursor.
+5. **Output.** Relative cursor moves are sent with `pynput`.
+
+Limits to be aware of:
+- It measures **tilt, not hand acceleration**. A fast hand movement adds linear acceleration to the reading and can briefly nudge the cursor.
+- Rotation about the vertical axis (yaw) cannot be seen from gravity, so only two directions of tilt are used.
+- The axis mapping depends on how the sensor is mounted; the signs may need swapping if it is worn differently.
+- A held tilt keeps the cursor moving (it is velocity control, not position control). Recalibrate with **C** if the neutral pose drifts.
+
+---
+
+## Why thresholds instead of a model
+
+We kept the random-forest pipeline above as the reference and built a much simpler detector for the live demo. The reasoning:
+
+**What went wrong with a window-level forest.** We trained a random forest on a new 60 s recording (index vs fist, labelled live with keys). Window accuracy looked good (91.8%), and every press was detected. But on held-out time blocks it chose the correct button for only **10 of 21** presses, about chance. Window accuracy hid the problem: most windows come from the middle of a hold, while the click is decided about 0.2 s after onset.
+
+**What the data showed.** We then looked at the peak strength (RMS divided by the background level) of each press, instead of per-window features:
+
+| Gesture | Session 1 (9 Nov), peak in first 250 ms | Session 2 (10 Nov), peak in first 250 ms |
+|---------|------------------------------------------|-------------------------------------------|
+| Index   | 2.6 to 6.1                               | 4.1 to 12.5 (median 6.8)                  |
+| Fist    | 6.8 to 12.2                              | 15.4 to 28.7 (median 19.2)                |
+
+Within each session the two classes do not overlap, and the first 250 ms is already enough. The absolute scale differs by about 2x between sessions (electrode contact), while the index-to-fist ratio stays similar, so the thresholds must be refitted per session. Two thresholds on the peak use that directly: one for "a press started" and one for "this is a fist".
+
+**Comparison of the two approaches**
+
+| | Random forest + LDA (`emg_pipeline.py`) | Threshold detector (`emg_common.py`) |
+|---|---|---|
+| Gestures | Index vs middle finger | Index vs full fist |
+| Training data | 3 sessions of 120 cued presses, recorded with OpenSignals | One 60 s recording labelled live with the A and D keys (26 index + 22 fist presses) |
+| Held-out result | 79.8% correct button among detected; 11 missed, 28 false clicks over 332 presses (leave-one-session-out) | 94.4% correct button among detected (34 of 36); 11 of 47 presses missed, 2 false clicks (5 time blocks of one 60 s recording) |
+| What is learned | Many trees plus an LDA, saved in a scikit-learn-version-specific `.joblib` | Two numbers (`x`, `y`) in `models/emg_thresholds.json` |
+| Tuning live | Retrain | `py live_emg.py --monitor`, or `--x` / `--y` |
+
+These results are **not directly comparable**: different gesture pairs, different recording setups, and the threshold result comes from a much smaller dataset.
+
+**Why this works, and where it stops working.**
+- A fist is far stronger than an index press, so amplitude alone separates them. Index vs middle finger have similar strength, so there the old pipeline needed frequency features and still reached only about 80%. That is why the gesture pair was changed.
+- With about 25 presses per class, a model with many parameters has little to learn from. Two thresholds can be fitted from 60 s of data, inspected by eye, and corrected on the spot.
+- **Priority.** We accept more missed presses in exchange for fewer wrong-button clicks, because repeating a press is cheaper than a wrong click.
+- **Weakness: missed presses.** In the held-out test, 11 of 47 presses (23%) never crossed the onset threshold `x` = 5.93, compared with about 3% for the forest. Every fist peak (15.4 or higher) is far above `x`, so the misses are almost all index presses (median peak 6.8).
+- **Likely cause.** The rest-noise estimate has a long tail (median 1.11, 99.5th percentile 6.77, max 16.09). Rest windows next to a press are probably counted as rest because the key press does not line up exactly with the muscle burst, which pulls `x` up. Lowering `x` by hand with `--x` (watch `--monitor`) recovers weak index presses at the cost of a higher false-click risk. The proper fix, ignoring rest windows near presses when fitting `x`, is not implemented.
+- **Cost.** Everything depends on one channel's amplitude, and the scale shifts about 2x between sessions, so refit after each re-attachment. The classes are cleanly separated within a session (session 2: 12.5 vs 15.4), but the fitted `y` (11.44) sits below the highest index peak (12.5), so a strong index press can be read as a fist.
+
+---
+
+## Status update (supersedes "Next steps" where they conflict)
+
+**Done**
+- Live EMG input from the BITalino and clicks sent to the OS (`live_emg.py`).
+- IMU cursor control, as a tilt joystick (`imu_mouse.py`), instead of the planned flick detector.
+- Both running together in an offline demo with the team.
+
+**Still open**
+- Second EMG channel, more sessions with electrodes re-attached, and realistic 2.5 to 4 s press spacing.
+- Use the IMU to suppress clicks while the hand is moving.
+- Nested validation of the detector settings.
+- Quantitative end-to-end test (move to a target, left click, right click) with error counts, and a measured press-to-click delay.

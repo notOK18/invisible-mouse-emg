@@ -1,5 +1,18 @@
+# Core
 numpy
-pandas
 scipy
-scikit-learn
+scikit-learn      # old random-forest pipeline; its .joblib model is tied to the sklearn version
 joblib
+pandas
+matplotlib
+
+# Live EMG (BITalino over a Windows outgoing COM port)
+pyserial
+bitalino
+
+# Live IMU (WitMotion WT901BLE over BLE)
+bleak
+
+# Keyboard hotkeys and mouse output (Windows)
+keyboard
+pynput

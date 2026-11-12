@@ -1,0 +1,15 @@
+data\emg_20261110_094531.npz: 26 index presses, 22 fist presses
+
+=== Held-out click test (live click logic) ===
+presses 47 | correct 34 | wrong button 2 | missed 11 | false clicks 2
+correct button among detected: 94.4%
+
+=== Final thresholds (all data) ===
+rest strength   : median 1.11, 99.5th pct 6.77, max 16.09
+index peaks     : 4.1 .. 12.5   (median 6.8)
+fist peaks      : 15.4 .. 28.7   (median 19.2)
+x (press onset) = 5.93
+y (fist)        = 11.44
+WARNING: some rest windows exceed x; expect occasional false clicks.
+
+Saved thresholds to models\emg_thresholds.json
