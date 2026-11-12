@@ -20,19 +20,66 @@ NOTIFY_UUID = "0000ffe4-0000-1000-8000-00805f9a34fb"
 # Accelerometer range (WitMotion default is commonly +/- 16g)
 ACCEL_RANGE_G = 16.0
 
-# Threshold in g — must exceed this on an axis to trigger movement
-THRESHOLD_G = 0.5
+# ---- Threshold ----------------------------------------------------
+# Tilt (in g, after removing neutral offset) that must be exceeded
+# before the cursor starts moving at all. Higher = you must tilt more
+# before anything happens. Lower = more sensitive.
+THRESHOLD_G = 0.4
 
-# Cursor speed when threshold is exceeded, pixels/sec
-SPEED = 800.0
 
-# Smoothing of cursor velocity (0..1, higher = smoother/slower response)
+# ---- Speed curve --------------------------------------------------
+# Cursor speed is NOT linear in tilt. Small tilts stay slow so you can
+# make fine corrections; large tilts go fast for crossing the screen.
+#
+# MIN_SPEED_PX: speed (px/sec) at the very moment you cross the
+#               threshold. This is your "micro-correction" speed.
+#               Lower = finer control, but need more ramp for big moves.
+MIN_SPEED_PX = 10.0
+
+# MAX_SPEED_PX: speed (px/sec) at full tilt AND fully ramped.
+#               This is your "cross the screen" speed.
+MAX_SPEED_PX = 1000.0
+
+# SPEED_CURVE_EXP: how aggressively speed grows with tilt.
+#   1.0 = linear (joystick feel, don't use)
+#   2.0 = gentle curve  (good starting point)
+#   3.0 = very fine near threshold, punchy at extremes
+SPEED_CURVE_EXP = 1.4
+
+
+# ---- Time-based ramp ----------------------------------------------
+# This is the key change from the old script: while you HOLD a tilt,
+# speed climbs toward MAX_SPEED_PX. Short taps = small move.
+# Sustained tilt = fast move. This is what makes it feel less like a
+# joystick and more like an accelerated pointer.
+#
+# RAMP_SECONDS: how long you must hold a tilt to reach full speed.
+#   Higher = slower to speed up = more precise, but long moves take
+#            longer to get going.
+#   Lower  = quicker acceleration = more responsive, less precise.
+RAMP_SECONDS = 1
+
+# RAMP_DECAY_SECONDS: how fast the ramp "resets" when you stop tilting.
+#   Lower = cursor stops crisply when you center the sensor.
+#   Higher = momentum feel (may overshoot).
+RAMP_DECAY_SECONDS = 0.15
+
+# RAMP_FLOOR: the fraction of full speed that is available even
+# before the ramp has charged. 0.25 means "at the first frame of
+# tilt you get 25% of the curved speed, then climb to 100%".
+#   Lower = even finer initial control, but noticeably rampy feel.
+#   Higher = more immediate response, closer to old behavior.
+RAMP_FLOOR = 0.25
+
+
+# ---- Smoothing ----------------------------------------------------
+# Low-pass filter on the cursor velocity. 0 = no smoothing (raw,
+# jittery). 0.9 = very smooth but laggy.
 VELOCITY_ALPHA = 0.6
 
-# Calibration
-CALIBRATION_SECONDS = 3.0
 
-# BLE scan
+# ---- Calibration / scan ------------------------------------------
+CALIBRATION_SECONDS = 3.0
 SCAN_SECONDS = 10.0
 
 
@@ -42,11 +89,13 @@ SCAN_SECONDS = 10.0
 
 mouse_enabled = False
 
-latest_accel = None           # (ax, ay, az) in g
+latest_accel = None              # (ax, ay, az) in g
 neutral_accel = (0.0, 0.0, 0.0)  # offsets captured during calibration
 
 smoothed_vx = 0.0
 smoothed_vy = 0.0
+
+ramp = 0.0                       # 0.0 .. 1.0 charge factor
 
 last_update = time.perf_counter()
 
@@ -66,12 +115,6 @@ def clamp(value, low, high):
     return max(low, min(high, value))
 
 
-def apply_dead_zone(value, dead_zone):
-    if abs(value) <= dead_zone:
-        return 0.0
-    return value - dead_zone if value > 0 else value + dead_zone
-
-
 # ==================================================
 # ACCELEROMETER PARSING
 # ==================================================
@@ -87,41 +130,43 @@ def parse_accel_packet(packet):
 
 
 # ==================================================
-# THRESHOLD -> CURSOR VELOCITY
+# THRESHOLD -> NORMALIZED DIRECTION
 # ==================================================
 
-def tilt_to_velocity(accel):
+def tilt_to_direction(accel):
     """
-    Rule (after removing the calibrated neutral offset):
+    Returns (nx, ny) where each component is in [-1, 1].
 
-        y < -0.6g  -> move up      (vy positive)
-        y >  0.6g  -> move down    (vy negative)
-        x >  0.6g  -> move left    (vx negative)
-        x < -0.6g  -> move right   (vx positive)
+    Magnitude 0   = inside dead-zone (no movement)
+    Magnitude 1   = fully past threshold on an axis
 
-    z is ignored.
+    Direction is the same as before:
+        y < -THRESHOLD  -> move up      (ny positive)
+        y >  THRESHOLD  -> move down    (ny negative)
+        x >  THRESHOLD  -> move left    (nx negative)
+        x < -THRESHOLD  -> move right   (nx positive)
+
+    Note this returns a *normalized* direction, not a speed. Speed is
+    applied separately in update_mouse() after the ramp is computed.
     """
-
     ax = accel[0] - neutral_accel[0]
     ay = accel[1] - neutral_accel[1]
     # az ignored
 
-    vx = 0.0
-    vy = 0.0
+    nx = 0.0
+    ny = 0.0
 
-    # Horizontal
     if ax > THRESHOLD_G:
-        vx = -SPEED * clamp((ax - THRESHOLD_G) / THRESHOLD_G, 0.0, 1.0)
+        nx = -clamp((ax - THRESHOLD_G) / THRESHOLD_G, 0.0, 1.0)
     elif ax < -THRESHOLD_G:
-        vx = SPEED * clamp((-ax - THRESHOLD_G) / THRESHOLD_G, 0.0, 1.0)
+        nx = clamp((-ax - THRESHOLD_G) / THRESHOLD_G, 0.0, 1.0)
 
-    # Vertical
     if ay < -THRESHOLD_G:
-        vy = SPEED * clamp((-ay - THRESHOLD_G) / THRESHOLD_G, 0.0, 1.0)
+        ny = clamp((-ay - THRESHOLD_G) / THRESHOLD_G, 0.0, 1.0)
     elif ay > THRESHOLD_G:
-        vy = -SPEED * clamp((ay - THRESHOLD_G) / THRESHOLD_G, 0.0, 1.0)
+        ny = -clamp((ay - THRESHOLD_G) / THRESHOLD_G, 0.0, 1.0)
 
-    return vx, vy
+    return nx, ny
 
 
 # ==================================================
@@ -140,25 +185,65 @@ def move_mouse_fractional(dx, dy):
 
 
 def update_mouse(accel):
-    global smoothed_vx, smoothed_vy, last_update
+    """
+    Full pipeline:
+        1. tilt -> normalized direction (nx, ny), magnitude 0..1
+        2. charge ramp based on how long the tilt is sustained
+        3. curve magnitude (small tilts stay small)
+        4. map magnitude -> px/sec between MIN_SPEED and MAX_SPEED
+        5. apply ramp multiplier so speed climbs while held
+        6. low-pass filter and move cursor
+    """
+    global smoothed_vx, smoothed_vy, last_update, ramp
 
     now = time.perf_counter()
-    dt = now - last_update
+    dt = clamp(now - last_update, 0.0, 0.05)
     last_update = now
-    dt = clamp(dt, 0.0, 0.05)
 
     if not mouse_enabled:
         smoothed_vx = 0.0
         smoothed_vy = 0.0
+        ramp = 0.0
         return
 
-    vx, vy = tilt_to_velocity(accel)
+    nx, ny = tilt_to_direction(accel)
+    magnitude = math.hypot(nx, ny)
 
-    smoothed_vx = VELOCITY_ALPHA * smoothed_vx + (1.0 - VELOCITY_ALPHA) * vx
-    smoothed_vy = VELOCITY_ALPHA * smoothed_vy + (1.0 - VELOCITY_ALPHA) * vy
+    # ---- 1. Charge / decay the ramp ------------------------------
+    if magnitude > 0.0:
+        # Held tilt: charge the ramp toward 1.0
+        ramp = min(1.0, ramp + dt / RAMP_SECONDS)
+    else:
+        # Released: fall back toward 0.0
+        ramp = max(0.0, ramp - dt / RAMP_DECAY_SECONDS)
 
-    if abs(smoothed_vx) < 1e-3 and abs(smoothed_vy) < 1e-3:
+    if magnitude < 1e-6:
+        smoothed_vx = 0.0
+        smoothed_vy = 0.0
         return
+
+    # ---- 2. Curve the magnitude ----------------------------------
+    # Small tilts -> small curved value -> small speed.
+    curved = magnitude ** SPEED_CURVE_EXP
+
+    # ---- 3. Map to pixels per second -----------------------------
+    speed_px = MIN_SPEED_PX + (MAX_SPEED_PX - MIN_SPEED_PX) * curved
+
+    # ---- 4. Apply ramp (charged speed) ---------------------------
+    # At ramp=0 we still give RAMP_FLOOR of the speed so the very
+    # first frame isn't dead. At ramp=1 we give full speed.
+    speed_px *= (RAMP_FLOOR + (1.0 - RAMP_FLOOR) * ramp)
+
+    # ---- 5. Convert to a velocity vector -------------------------
+    dirx = nx / magnitude
+    diry = ny / magnitude
+
+    target_vx = dirx * speed_px
+    target_vy = diry * speed_px
+
+    # ---- 6. Smooth + apply ---------------------------------------
+    smoothed_vx = VELOCITY_ALPHA * smoothed_vx + (1.0 - VELOCITY_ALPHA) * target_vx
+    smoothed_vy = VELOCITY_ALPHA * smoothed_vy + (1.0 - VELOCITY_ALPHA) * target_vy
 
     move_mouse_fractional(smoothed_vx * dt, smoothed_vy * dt)
 
@@ -205,7 +290,7 @@ async def find_sensor():
 # ==================================================
 
 async def calibrate():
-    global neutral_accel, smoothed_vx, smoothed_vy
+    global neutral_accel, smoothed_vx, smoothed_vy, ramp
 
     print()
     print("Calibration starting.")
@@ -231,6 +316,7 @@ async def calibrate():
     neutral_accel = avg
     smoothed_vx = 0.0
     smoothed_vy = 0.0
+    ramp = 0.0
 
     print("Calibration complete.")
     print("Neutral accel:", tuple(round(x, 3) for x in neutral_accel))
@@ -255,7 +341,7 @@ async def mouse_loop(rate_hz=100):
 # ==================================================
 
 async def main():
-    global mouse_enabled, last_update
+    global mouse_enabled, smoothed_vx, smoothed_vy, ramp, last_update
 
     device = await find_sensor()
     if device is None:
@@ -294,6 +380,7 @@ async def main():
                 mouse_enabled = not mouse_enabled
                 smoothed_vx = 0.0
                 smoothed_vy = 0.0
+                ramp = 0.0
                 last_update = time.perf_counter()
                 print("\nMouse:", "ENABLED" if mouse_enabled else "DISABLED")
                 await asyncio.sleep(0.3)
@@ -309,13 +396,18 @@ async def main():
             if latest_accel is not None:
                 ax, ay, az = latest_accel
                 print(
-                    f"\rAccel: X={ax:6.2f}g Y={ay:6.2f}g Z={az:6.2f}g",
+                    f"\rAccel: X={ax:6.2f}g Y={ay:6.2f}g Z={az:6.2f}g "
+                    f"ramp={ramp:0.2f}",
                     end=""
                 )
 
             await asyncio.sleep(0.01)
 
         mouse_task.cancel()
+        try:
+            await mouse_task
+        except asyncio.CancelledError:
+            pass
         await client.stop_notify(NOTIFY_UUID)
 
     print()
